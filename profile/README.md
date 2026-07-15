@@ -64,7 +64,7 @@ Plus:
 | [**tcs-public-wiki**](https://github.com/The-Canadian-Space/tcs-public-wiki) | Source for the public-facing docs at [wiki.thecanadian.space](https://wiki.thecanadian.space) |
 | [**tcs-images**](https://github.com/Godimas101/tcs-images) | 100+ images used across published posts. Stays under `Godimas101/` to preserve WordPress URLs. |
 
-**Private** *(workflow management + planned future projects)*
+**Private** *(workflow management + games in development)*
 
 | Repo | Status |
 |---|---|
@@ -72,12 +72,13 @@ Plus:
 | **tcs-docs** | Internal wiki (Cloudflare-Access-gated) |
 | **tcs-archive** | Historical dev artifacts |
 | **tcs-webpage** | *Planned* — rebuild of the site frontend (moving off WordPress) |
-| **tcs-arcade** | *Planned* — browser games at thecanadian.space |
+| **idle-launch** | *In development* — a space-themed browser idle game for launch-watchers |
+| **autodoom** | *In development* — an auto-playing take on Doom, inspired by Clickpocalypse 2 |
 
 ## 🎯 What's next
 
 - **tcs-webpage rebuild** — move away from WordPress to a custom frontend (design phase)
-- **tcs-arcade launch** — browser games embedded on the site
+- **TCS arcade launch** — two browser games in development ([`idle-launch`](https://github.com/The-Canadian-Space/idle-launch) + [`autodoom`](https://github.com/The-Canadian-Space/autodoom), currently private during build)
 - **Fact-checker LLM pass** — automated claim verification via extended-thinking models
 - **International aerospace sources** — expanding beyond Canada-adjacent coverage
 
