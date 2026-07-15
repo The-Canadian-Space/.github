@@ -1,61 +1,106 @@
-# The Canadian Space
+<p align="center">
+  <img src="https://capsule-render.vercel.app/api?type=blur&height=220&color=0:0B1021,30:0EA5E9,65:2563EB,100:7C3AED&text=The%20Canadian%20Space&fontColor=ffffff&fontSize=48&fontAlignY=38&desc=Automated%20aerospace%20newsroom%20%C2%B7%20AI%20%C2%B7%20n8n%20%C2%B7%20end-to-end&descAlignY=63&descSize=18&animation=fadeIn" />
+</p>
 
-Aerospace news for Canada — fully automated, end-to-end.
+<p align="center">
+  <a href="https://thecanadian.space"><img src="https://img.shields.io/badge/thecanadian.space-visit-0EA5E9?style=for-the-badge&logo=rocket&logoColor=white" alt="thecanadian.space" /></a>
+  <a href="https://wiki.thecanadian.space"><img src="https://img.shields.io/badge/Public%20Wiki-docs-14B8A6?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Public wiki" /></a>
+  <a href="https://patreon.com/Godimas101"><img src="https://img.shields.io/badge/Patreon-project%20log-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Patreon" /></a>
+  <a href="https://www.linkedin.com/in/rustygear/"><img src="https://img.shields.io/badge/LinkedIn-work%20stuff-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
+</p>
 
-## What We Do
+> **"Aerospace news for Canada — fully automated, end-to-end."**
 
-The Canadian Space is an automated newsroom that discovers, curates, and publishes aerospace stories relevant to Canada. We run seven specialized blog workflows covering daily aerospace news, NASA missions, SpaceX launches, commercial space ventures, Blue Origin, Rocket Lab, and Canadian satellite data. Each post is researched, edited by AI, fact-checked, and published to WordPress with full cost tracking and SEO optimization—all without manual intervention.
+The Canadian Space is a real production newsroom that discovers, researches, edits, and publishes aerospace stories relevant to Canada — without human intervention. Seven specialized blog workflows, an AI editor pass, cost tracking, and social publishing, all orchestrated in **n8n** on a self-hosted VPS. Stories land at [**thecanadian.space**](https://thecanadian.space) 24/7.
 
-This is a real production system running on a VPS in France, pulling news from 40+ sources, processing through custom Python tools and n8n orchestration, and serving readers at [thecanadian.space](https://thecanadian.space).
+## 🚀 Shipping now
 
-## The Repos
+**Seven active blog workflows:**
+
+| Blog | Focus |
+|---|---|
+| **Daily Broadcast** | Cross-cutting aerospace news for the day |
+| **NASA Overview** | NASA missions + programs |
+| **SpaceX Report** | SpaceX launches, Starship, Dragon |
+| **Commercial Space** | Rocket Lab-adjacent commercial ventures |
+| **Bright Blue Origin** | Blue Origin coverage |
+| **Rocket Lab Roundup** | Rocket Lab-specific reporting |
+| **Canada From Orbit** | Canadian satellite + payload data |
+
+Plus:
+- **Editor LLM** — Claude Haiku with SEO rules + fact-check safeguards; Grok 3 fallback on API errors
+- **Cost tracking** — real-time LLM API spend (Anthropic + Google + xAI), weekly digest
+- **Social posts** — automated X + LinkedIn engagement
+- **Multi-source ingestion** — 40+ news sources via Crawl4AI + plain HTTP + WordPress REST APIs
+
+## 🧰 The stack
+
+<p align="left">
+  <img src="https://img.shields.io/badge/n8n-EA4B71?style=for-the-badge&logo=n8n&logoColor=white" alt="n8n" />
+  <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/WordPress-21759B?style=for-the-badge&logo=wordpress&logoColor=white" alt="WordPress" />
+  <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
+  <img src="https://img.shields.io/badge/Redis-DC382D?style=for-the-badge&logo=redis&logoColor=white" alt="Redis" />
+  <img src="https://img.shields.io/badge/Caddy-1F88C0?style=for-the-badge&logo=caddy&logoColor=white" alt="Caddy" />
+  <img src="https://img.shields.io/badge/OVH%20VPS-123F6D?style=for-the-badge&logo=ovh&logoColor=white" alt="OVH VPS" />
+  <img src="https://img.shields.io/badge/Claude-DC7B4C?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude" />
+</p>
+
+- **Orchestration:** n8n (39 workflows total)
+- **Python:** article scraper, cost processors, API helpers
+- **CMS:** WordPress (Newfold hosting)
+- **LLMs:** Anthropic Claude (Haiku primary, Opus for heavy analysis), Google Gemini, xAI Grok via OpenRouter
+- **Infrastructure:** OVH VPS2 — Docker + Redis + Caddy reverse proxy
+- **SEO:** Rank Math WordPress plugin
+
+## 📚 The repos
 
 **Public**
 
-- **tcs-images** — 100+ images used across published posts. Stays under our original Godimas101 account to avoid breaking URLs on WordPress.
-- **tcs-scripts** — n8n workflow node definitions, API cost trackers, and utility scripts for TCS operations.
-- **tcs-tools** — Python utilities: article scraper, cost calculations, and data processing helpers.
+| Repo | What's in it |
+|---|---|
+| [**tcs-tools**](https://github.com/The-Canadian-Space/tcs-tools) | Python utilities — article scraper, cost calc, data processing |
+| [**tcs-scripts**](https://github.com/The-Canadian-Space/tcs-scripts) | n8n workflow node definitions, API cost trackers, utility scripts |
+| [**tcs-public-wiki**](https://github.com/The-Canadian-Space/tcs-public-wiki) | Source for the public-facing docs at [wiki.thecanadian.space](https://wiki.thecanadian.space) |
+| [**tcs-images**](https://github.com/Godimas101/tcs-images) | 100+ images used across published posts. Stays under `Godimas101/` to preserve WordPress URLs. |
 
-**Private** (workflow management and future projects)
+**Private** *(workflow management + planned future projects)*
 
-- **tcs-workflows** — Automated backups of all 39 n8n workflows. Contains the current 14 TCS workflows plus 25 unrelated personal automation.
-- **tcs-arcade** — *Planned*. Browser games coming to thecanadian.space.
-- **tcs-webpage** — *Planned*. Rebuild of the site frontend (currently WordPress).
+| Repo | Status |
+|---|---|
+| **tcs-workflows** | Automated backups of all 39 n8n workflows |
+| **tcs-docs** | Internal wiki (Cloudflare-Access-gated) |
+| **tcs-archive** | Historical dev artifacts |
+| **tcs-webpage** | *Planned* — rebuild of the site frontend (moving off WordPress) |
+| **tcs-arcade** | *Planned* — browser games at thecanadian.space |
 
-## Currently Shipping
+## 🎯 What's next
 
-**7 Active Blog Workflows**
-- Daily Broadcast, NASA Overview, SpaceX Report, Commercial Space, Bright Blue Origin, Rocket Lab Roundup, Canada From Orbit
+- **tcs-webpage rebuild** — move away from WordPress to a custom frontend (design phase)
+- **tcs-arcade launch** — browser games embedded on the site
+- **Fact-checker LLM pass** — automated claim verification via extended-thinking models
+- **International aerospace sources** — expanding beyond Canada-adjacent coverage
 
-**Recent Additions**
-- **Editor LLM** — Claude Haiku processes every post through SEO rules and fact-checking safeguards before publication. Fallback to Grok 3 on API errors.
-- **Cost Tracking** — Real-time tracking of LLM API spend (Anthropic, Google, xAI) with weekly digest reports.
-- **Social Posts** — Automated engagement on X and LinkedIn.
+## 📖 Visit
 
-## The Stack
+- **Blog:** [thecanadian.space](https://thecanadian.space)
+- **Public wiki:** [wiki.thecanadian.space](https://wiki.thecanadian.space)
+- **Behind the scenes:** [Patreon — project log](https://patreon.com/Godimas101)
 
-- **Orchestration**: n8n (39 workflows total)
-- **Python**: Article scraper, cost processors, API helpers
-- **CMS**: WordPress (Newfold hosting)
-- **LLMs**: Anthropic Claude (Haiku primary, Opus for heavy analysis), Google Gemini, xAI Grok via OpenRouter
-- **Infrastructure**: OVH VPS2 (51.195.43.156) — Docker, Redis, Caddy reverse proxy
-- **SEO**: Rank Math WordPress plugin
+## 🤝 Contributing
 
-## What's Next
+Currently a solo venture, but built with future collaborators in mind. If you're interested in the newsroom, the Python tools, or the n8n workflows, reach out. Every repo has an **AGENTS.md** at the root for technical onboarding — start there.
 
-- **tcs-webpage rebuild** — Move away from WordPress to a custom frontend (early design phase).
-- **tcs-arcade launch** — Browser games embedded on the site.
-- **Fact-checker LLM pass** — Automated verification of claims using extended-thinking models.
-- **New news sources** — Expanding coverage to international aerospace news.
+## 🧡 Support
 
-## Visit
+The Canadian Space is a personal project + portfolio piece. If you like what we're building, **Patreon** is where the running project log lives — behind-the-scenes notes, dev diaries, cost breakdowns, and updates you won't see on the blog.
 
-Read our latest posts at [thecanadian.space](https://thecanadian.space).
-
-## Contributing
-
-This project is currently a solo venture, but we're building with future collaborators in mind. If you're interested in contributing to the newsroom, the Python tools, or the n8n workflows, reach out. Check **AGENTS.md** in any repo for technical onboarding.
+[![Support on Patreon](https://raw.githubusercontent.com/Godimas101/personal-projects/main/patreon/images/buttons/patreon-medium.png)](https://patreon.com/Godimas101)
 
 ---
 
-*The Canadian Space is a personal project and portfolio piece built to demonstrate full-stack automation, AI integration, and infrastructure management. All code, workflows, and infrastructure are by Chris Carpenter (Godimas101).*
+*The Canadian Space is built + operated by [Chris Carpenter (Godimas101)](https://github.com/Godimas101). Full-stack automation, AI integration, and self-hosted infrastructure — running live 24/7.*
+
+<p align="center">
+  <img src="https://capsule-render.vercel.app/api?type=soft&section=footer&height=120&color=0:0B1021,30:0EA5E9,65:2563EB,100:7C3AED" />
+</p>
