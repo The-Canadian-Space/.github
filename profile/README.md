@@ -62,7 +62,7 @@ Plus:
 | [**tcs-tools**](https://github.com/The-Canadian-Space/tcs-tools) | Python utilities — article scraper, cost calc, data processing |
 | [**tcs-scripts**](https://github.com/The-Canadian-Space/tcs-scripts) | n8n workflow node definitions, API cost trackers, utility scripts |
 | [**tcs-public-wiki**](https://github.com/The-Canadian-Space/tcs-public-wiki) | Source for the public-facing docs at [wiki.thecanadian.space](https://wiki.thecanadian.space) |
-| [**tcs-images**](https://github.com/Godimas101/tcs-images) | 100+ images used across published posts. Stays under `Godimas101/` to preserve WordPress URLs. |
+| [**tcs-images**](https://github.com/The-Canadian-Space/tcs-images) | 100+ images used across published posts. Moved into TCS org 2026-07-16 — GitHub's redirect handles the WordPress-linked raw URLs. |
 
 **Private** *(workflow management + games in development)*
 
