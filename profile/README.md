@@ -7,6 +7,7 @@
   <a href="https://wiki.thecanadian.space"><img src="https://img.shields.io/badge/Public%20Wiki-docs-14B8A6?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Public wiki" /></a>
   <a href="https://patreon.com/Godimas101"><img src="https://img.shields.io/badge/Patreon-project%20log-FF424D?style=for-the-badge&logo=patreon&logoColor=white" alt="Patreon" /></a>
   <a href="https://www.linkedin.com/in/rustygear/"><img src="https://img.shields.io/badge/LinkedIn-work%20stuff-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
+  <a href="https://godimas101.github.io/portfolio/"><img src="https://img.shields.io/badge/Chris's%20Portfolio-godimas101.github.io-C5B029?style=for-the-badge&logo=githubpages&logoColor=white" alt="Chris's Portfolio" /></a>
 </p>
 
 > **"Aerospace news for Canada — fully automated, end-to-end."**
