@@ -1,0 +1,167 @@
+name: Append entry to CHANGELOG (reusable)
+
+# Reusable workflow. Called by per-repo on-issue-close workflows to append
+# a Keep-a-Changelog "Unreleased" entry when an issue is closed as completed.
+#
+# Caller must:
+#   - grant `permissions: contents: write` (a called workflow can't escalate
+#     above the caller, so without this the caller inherits the repo's
+#     read-only default and the call fails at startup)
+#   - use `secrets: inherit` so TCS_PROJECT_TOKEN is available (optional —
+#     falls back to GITHUB_TOKEN for repos without it, e.g. Godimas101 repos)
+#   - pass the closed issue's number, title, closer, and state_reason
+#
+# The reusable workflow runs in the CALLER's repo context — `actions/checkout`
+# checks out the caller's repo, and commits are pushed to the caller's `main`.
+#
+# Security note: issue title is USER-CONTROLLED on public repos. It is passed
+# to Python via environment variable (never interpolated into the script body)
+# and never eval'd or executed as shell.
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        required: true
+        type: number
+      issue_title:
+        required: true
+        type: string
+      closed_by:
+        required: true
+        type: string
+      state_reason:
+        required: false
+        type: string
+        default: completed
+
+jobs:
+  append:
+    runs-on: ubuntu-latest
+    # Only append when the issue was closed as "completed" (not "not planned")
+    if: inputs.state_reason == 'completed'
+    permissions:
+      contents: write
+    steps:
+      - name: Check out caller repo
+        uses: actions/checkout@v4
+        with:
+          # Prefer TCS_PROJECT_TOKEN when the caller has it (The-Canadian-Space repos
+          # inherit it via secrets: inherit). Fall back to the caller's default
+          # GITHUB_TOKEN (which has contents: write via the permissions block
+          # above) for repos that don't have the org secret — e.g. Godimas101
+          # personal repos also using this reusable workflow.
+          token: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
+
+      - name: Append to CHANGELOG.md
+        env:
+          ISSUE_NUM: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          CLOSER: ${{ inputs.closed_by }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # The append logic lives in a file so the retry loop below can re-run
+          # it against the latest CHANGELOG after a concurrent push.
+          cat > "$RUNNER_TEMP/append_changelog.py" <<'PY'
+          import os, pathlib, re
+          from datetime import datetime, timezone
+
+          issue_num = os.environ["ISSUE_NUM"]
+          title  = os.environ["ISSUE_TITLE"]
+          closer = os.environ["CLOSER"]
+          repo   = os.environ["REPO"]
+
+          date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+          issue_url = f"https://github.com/{repo}/issues/{issue_num}"
+          # Minimal markdown escape for the title (leave the rest as-is)
+          safe = title.replace("[", "\\[").replace("]", "\\]")
+          entry = f"- {safe} ([#{issue_num}]({issue_url})) — closed {date} by @{closer}\n"
+
+          p = pathlib.Path("CHANGELOG.md")
+          if not p.exists():
+              p.write_text(
+                  "# Changelog\n\n"
+                  "All notable changes to this project are documented here.\n"
+                  "Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n"
+                  "## [Unreleased]\n\n",
+                  encoding="utf-8",
+              )
+
+          txt = p.read_text(encoding="utf-8")
+
+          # Idempotent: don't double-add on a retry whose entry already landed.
+          if entry.strip() in txt:
+              print(f"Entry for #{issue_num} already present — nothing to do")
+              raise SystemExit(0)
+
+          # Ensure an [Unreleased] section exists. Insert it just before the first
+          # release section ("## [1.2.0]" / "## [2026-07-25]" ...) so it lands
+          # after any intro paragraph, not jammed under the "# Changelog" title.
+          if "## [Unreleased]" not in txt:
+              m = re.search(r"^## \[", txt, flags=re.M)
+              if m:
+                  txt = txt[:m.start()] + "## [Unreleased]\n\n" + txt[m.start():]
+              else:
+                  if not txt.endswith("\n"):
+                      txt += "\n"
+                  txt += "\n## [Unreleased]\n\n"
+
+          # Insert the entry under the [Unreleased] header (newest first), keeping
+          # a blank line before the following section.
+          lines = txt.splitlines(keepends=True)
+          for i, line in enumerate(lines):
+              if line.startswith("## [Unreleased]"):
+                  j = i + 1
+                  if j < len(lines) and lines[j].strip() == "":
+                      j += 1                        # keep the blank after the header
+                  else:
+                      lines.insert(j, "\n"); j += 1
+                  if j < len(lines) and lines[j].lstrip().startswith("- "):
+                      lines.insert(j, entry)        # existing entries: tight list
+                  else:
+                      lines.insert(j, entry)        # empty section: entry + blank
+                      lines.insert(j + 1, "\n")
+                  break
+          else:
+              raise SystemExit("Could not locate [Unreleased] header after bootstrap")
+
+          p.write_text("".join(lines), encoding="utf-8")
+          print(f"Appended entry for issue #{issue_num}")
+          PY
+
+          git config user.name "tcs-bot"
+          git config user.email "actions@github.com"
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+
+          # Append + push, retrying on a concurrent update: when several issues
+          # are closed at once their runs push near-simultaneously; the loser of
+          # a push race re-syncs and re-appends onto the winner's update instead
+          # of failing.
+          for attempt in 1 2 3 4 5; do
+            python3 "$RUNNER_TEMP/append_changelog.py"
+
+            # git status --porcelain also catches the untracked first-run bootstrap
+            # (git diff --quiet would report "no diff" for an untracked file).
+            if [[ -z "$(git status --porcelain CHANGELOG.md)" ]]; then
+              echo "CHANGELOG.md unchanged — nothing to commit"
+              exit 0
+            fi
+
+            git add CHANGELOG.md
+            git commit -q -m "CHANGELOG: entry for closed issue #${ISSUE_NUM}"
+
+            if git push; then
+              echo "Pushed on attempt ${attempt}"
+              exit 0
+            fi
+
+            echo "Push attempt ${attempt} rejected (concurrent update) — re-syncing and retrying..."
+            git fetch -q origin "$branch"
+            git reset -q --hard "origin/${branch}"
+            sleep $(( attempt * 2 ))
+          done
+
+          echo "::error::Could not push CHANGELOG update after 5 attempts"
+          exit 1
