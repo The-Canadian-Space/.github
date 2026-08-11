@@ -72,12 +72,14 @@ Plus:
 | **tcs-workflows** | Automated backups of all 39 n8n workflows |
 | **tcs-docs** | Internal wiki (Cloudflare-Access-gated) |
 | **tcs-archive** | Historical dev artifacts |
+| **tcs-discord** | *In planning* — Discord community hub: server architecture, bot configs, integration wiring |
 | **tcs-webpage** | *Planned* — rebuild of the site frontend (moving off WordPress) |
 | **idle-launch** | *In development* — a space-themed browser idle game for launch-watchers |
 | **autodoom** | *In development* — an auto-playing take on Doom, inspired by Clickpocalypse 2 |
 
 ## 🎯 What's next
 
+- **Discord community hub** — server + admin alerting + blog notifications + game/mod ticket feeds ([`tcs-discord`](https://github.com/The-Canadian-Space/tcs-discord), currently in Phase 1 planning)
 - **tcs-webpage rebuild** — move away from WordPress to a custom frontend (design phase)
 - **TCS arcade launch** — two browser games in development ([`idle-launch`](https://github.com/The-Canadian-Space/idle-launch) + [`autodoom`](https://github.com/The-Canadian-Space/autodoom), currently private during build)
 - **Fact-checker LLM pass** — automated claim verification via extended-thinking models
