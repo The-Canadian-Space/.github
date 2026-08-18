@@ -3,16 +3,25 @@ name: Append entry to CHANGELOG (reusable)
 # Reusable workflow. Called by per-repo on-issue-close workflows to append
 # a Keep-a-Changelog "Unreleased" entry when an issue is closed as completed.
 #
+# 2026-08-18 rewrite: PR-based flow (previously direct-push).
+#   Old flow pushed directly to main. Broken on any repo with PR-required
+#   branch protection — the bot's push was rejected. 3 TCS repos were
+#   silently missing CHANGELOG entries (tcs-tools, tcs-images, tcs-scripts).
+#   New flow: create bot branch → open PR → enable auto-merge. Works on
+#   every repo, with or without branch protection, and produces a clean
+#   audit trail (every CHANGELOG update = one PR on record).
+#
 # Caller must:
-#   - grant `permissions: contents: write` (a called workflow can't escalate
-#     above the caller, so without this the caller inherits the repo's
-#     read-only default and the call fails at startup)
+#   - grant `permissions: contents: write, pull-requests: write`
+#     (contents:write for branch + push, pull-requests:write for PR + auto-merge)
 #   - use `secrets: inherit` so TCS_PROJECT_TOKEN is available (optional —
-#     falls back to GITHUB_TOKEN for repos without it, e.g. Godimas101 repos)
+#     falls back to GITHUB_TOKEN for repos without the org secret)
 #   - pass the closed issue's number, title, closer, and state_reason
 #
-# The reusable workflow runs in the CALLER's repo context — `actions/checkout`
-# checks out the caller's repo, and commits are pushed to the caller's `main`.
+# Caller repo one-time config (required):
+#   - Settings → General → Pull Requests → "Allow auto-merge" = ON
+#     Without this, the PR is opened but sits unmerged until manually merged.
+#     A migration script (see tcs-docs#26) sets this across all TCS repos.
 #
 # Security note: issue title is USER-CONTROLLED on public repos. It is passed
 # to Python via environment variable (never interpolated into the script body)
@@ -42,28 +51,31 @@ jobs:
     if: inputs.state_reason == 'completed'
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - name: Check out caller repo
         uses: actions/checkout@v4
         with:
-          # Prefer TCS_PROJECT_TOKEN when the caller has it (The-Canadian-Space repos
-          # inherit it via secrets: inherit). Fall back to the caller's default
-          # GITHUB_TOKEN (which has contents: write via the permissions block
-          # above) for repos that don't have the org secret — e.g. Godimas101
-          # personal repos also using this reusable workflow.
+          # Prefer TCS_PROJECT_TOKEN when the caller has it. Fall back to the
+          # caller's default GITHUB_TOKEN for repos without the org secret.
           token: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
+          fetch-depth: 0
 
-      - name: Append to CHANGELOG.md
+      - name: Branch, append, PR, auto-merge
         env:
+          GH_TOKEN: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
           ISSUE_NUM: ${{ inputs.issue_number }}
           ISSUE_TITLE: ${{ inputs.issue_title }}
           CLOSER: ${{ inputs.closed_by }}
           REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
 
-          # The append logic lives in a file so the retry loop below can re-run
-          # it against the latest CHANGELOG after a concurrent push.
+          # -----------------------------------------------------------------
+          # 1. Write the append script (Python — same logic as pre-rewrite,
+          #    idempotent so a retry against a rebased branch doesn't dupe).
+          # -----------------------------------------------------------------
           cat > "$RUNNER_TEMP/append_changelog.py" <<'PY'
           import os, pathlib, re
           from datetime import datetime, timezone
@@ -91,14 +103,13 @@ jobs:
 
           txt = p.read_text(encoding="utf-8")
 
-          # Idempotent: don't double-add on a retry whose entry already landed.
+          # Idempotent: don't double-add on a re-run whose entry already landed.
           if entry.strip() in txt:
               print(f"Entry for #{issue_num} already present — nothing to do")
               raise SystemExit(0)
 
-          # Ensure an [Unreleased] section exists. Insert it just before the first
-          # release section ("## [1.2.0]" / "## [2026-07-25]" ...) so it lands
-          # after any intro paragraph, not jammed under the "# Changelog" title.
+          # Ensure an [Unreleased] section exists. Insert just before the first
+          # release section so it lands after any intro paragraph.
           if "## [Unreleased]" not in txt:
               m = re.search(r"^## \[", txt, flags=re.M)
               if m:
@@ -108,8 +119,7 @@ jobs:
                       txt += "\n"
                   txt += "\n## [Unreleased]\n\n"
 
-          # Insert the entry under the [Unreleased] header (newest first), keeping
-          # a blank line before the following section.
+          # Insert the entry under the [Unreleased] header (newest first).
           lines = txt.splitlines(keepends=True)
           for i, line in enumerate(lines):
               if line.startswith("## [Unreleased]"):
@@ -131,37 +141,66 @@ jobs:
           print(f"Appended entry for issue #{issue_num}")
           PY
 
+          # -----------------------------------------------------------------
+          # 2. Set up git identity + resolve the caller's default branch.
+          # -----------------------------------------------------------------
           git config user.name "tcs-bot"
           git config user.email "actions@github.com"
-          branch="$(git rev-parse --abbrev-ref HEAD)"
 
-          # Append + push, retrying on a concurrent update: when several issues
-          # are closed at once their runs push near-simultaneously; the loser of
-          # a push race re-syncs and re-appends onto the winner's update instead
-          # of failing.
-          for attempt in 1 2 3 4 5; do
-            python3 "$RUNNER_TEMP/append_changelog.py"
+          base_branch=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+          # RUN_ID makes the branch name unique across concurrent runs for the
+          # same issue (rare, but happens on hand-retries).
+          bot_branch="bot/changelog-issue-${ISSUE_NUM}-${RUN_ID}"
 
-            # git status --porcelain also catches the untracked first-run bootstrap
-            # (git diff --quiet would report "no diff" for an untracked file).
-            if [[ -z "$(git status --porcelain CHANGELOG.md)" ]]; then
-              echo "CHANGELOG.md unchanged — nothing to commit"
-              exit 0
-            fi
+          # -----------------------------------------------------------------
+          # 3. Create branch, run the append, commit.
+          # -----------------------------------------------------------------
+          git checkout -b "$bot_branch"
+          python3 "$RUNNER_TEMP/append_changelog.py"
 
-            git add CHANGELOG.md
-            git commit -q -m "CHANGELOG: entry for closed issue #${ISSUE_NUM}"
+          # git status --porcelain also catches the untracked first-run bootstrap.
+          if [[ -z "$(git status --porcelain CHANGELOG.md)" ]]; then
+            echo "CHANGELOG.md unchanged — nothing to commit"
+            exit 0
+          fi
 
-            if git push; then
-              echo "Pushed on attempt ${attempt}"
-              exit 0
-            fi
+          git add CHANGELOG.md
+          git commit -q -m "chore(changelog): entry for closed issue #${ISSUE_NUM}"
 
-            echo "Push attempt ${attempt} rejected (concurrent update) — re-syncing and retrying..."
-            git fetch -q origin "$branch"
-            git reset -q --hard "origin/${branch}"
-            sleep $(( attempt * 2 ))
-          done
+          # -----------------------------------------------------------------
+          # 4. Push branch, open PR, enable auto-merge.
+          # -----------------------------------------------------------------
+          git push origin "$bot_branch"
 
-          echo "::error::Could not push CHANGELOG update after 5 attempts"
-          exit 1
+          pr_url=$(gh pr create \
+            --base "$base_branch" \
+            --head "$bot_branch" \
+            --title "chore(changelog): entry for #${ISSUE_NUM}" \
+            --body "Auto-generated by \`append-changelog.yml\` when issue [#${ISSUE_NUM}](https://github.com/${REPO}/issues/${ISSUE_NUM}) closed as completed.
+
+          Adds one entry to \`CHANGELOG.md\` under \`[Unreleased]\`. Merges automatically as soon as any required status checks pass.")
+
+          echo "PR: $pr_url"
+
+          # -----------------------------------------------------------------
+          # 5. Enable auto-merge. Preferred: --auto (waits for checks + merges
+          #    when they pass). Fallback: immediate --squash for repos without
+          #    branch protection or without checks. If both fail, the PR is
+          #    left open + Chris can merge manually.
+          # -----------------------------------------------------------------
+          if gh pr merge --auto --squash --delete-branch "$pr_url" 2>/dev/null; then
+            echo "Auto-merge enabled on PR $pr_url"
+            exit 0
+          fi
+
+          echo "::warning::Auto-merge could not be enabled. Trying immediate squash-merge."
+          if gh pr merge --squash --delete-branch "$pr_url" 2>/dev/null; then
+            echo "Squash-merged PR $pr_url immediately"
+            exit 0
+          fi
+
+          echo "::warning::Could not merge PR $pr_url automatically. Left open for manual review."
+          echo "::warning::Most likely cause: repo needs 'Allow auto-merge' enabled in Settings → General → Pull Requests."
+          echo "::warning::OR: branch protection requires PR review approvals (needs a human approval)."
+          # Exit 0 — leaving a PR open is not a failure state; Chris can merge later.
+          exit 0
