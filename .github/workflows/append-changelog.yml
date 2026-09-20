@@ -3,25 +3,48 @@ name: Append entry to CHANGELOG (reusable)
 # Reusable workflow. Called by per-repo on-issue-close workflows to append
 # a Keep-a-Changelog "Unreleased" entry when an issue is closed as completed.
 #
-# 2026-08-18 rewrite: PR-based flow (previously direct-push).
-#   Old flow pushed directly to main. Broken on any repo with PR-required
-#   branch protection — the bot's push was rejected. 3 TCS repos were
-#   silently missing CHANGELOG entries (tcs-tools, tcs-images, tcs-scripts).
-#   New flow: create bot branch → open PR → enable auto-merge. Works on
-#   every repo, with or without branch protection, and produces a clean
-#   audit trail (every CHANGELOG update = one PR on record).
+# 2026-09-19 rewrite: converge-per-run (previously one PR per issue).
+#   The 08-18 PR flow opened `bot/changelog-issue-<n>-<run>` per closed issue
+#   and tried one immediate merge. When several issues closed together the
+#   runs overlapped, the first merge moved main, and every other PR became
+#   CONFLICTING on the same [Unreleased] line — with stderr discarded, so the
+#   log just said "left open for manual review". 14 stacked PRs across 5 repos
+#   on 2026-09-19. (tcs-scripts#17 tried a caller-side `concurrency` group;
+#   it only reached one repo, and GitHub *cancels* older pending runs in a
+#   group, which would silently drop entries instead of stacking them.)
+#
+#   New flow, per run, no concurrency group:
+#     1. fetch main; if our entry is already there → done (idempotent).
+#     2. rebuild ONE stable branch `bot/changelog` = main + any entries still
+#        pending on that branch (carried over) + ours; force-push with lease.
+#        Never rebase — regenerate, so there is nothing to conflict.
+#     3. one open PR from that branch (create or reuse).
+#     4. try an immediate squash-merge. On a merge race / conflict / stale
+#        mergeability → sleep with jitter and go back to 1. On branch
+#        protection (review or checks required) → enable auto-merge and stop:
+#        the PR waits for a human, and later entries ACCUMULATE on it instead
+#        of opening new conflicting PRs.
+#   Runs that overlap converge: whoever loses the push lease or the merge
+#   race simply rebuilds on top of the winner.
 #
 # Caller must:
 #   - grant `permissions: contents: write, pull-requests: write`
-#     (contents:write for branch + push, pull-requests:write for PR + auto-merge)
-#   - use `secrets: inherit` so TCS_PROJECT_TOKEN is available (optional —
-#     falls back to GITHUB_TOKEN for repos without the org secret)
+#   - use `secrets: inherit` (TCS_PROJECT_TOKEN is used if the caller has it;
+#     otherwise the caller's GITHUB_TOKEN)
 #   - pass the closed issue's number, title, closer, and state_reason
+#   - NOT wrap the call in a `concurrency` group (see above)
 #
-# Caller repo one-time config (required):
-#   - Settings → General → Pull Requests → "Allow auto-merge" = ON
-#     Without this, the PR is opened but sits unmerged until manually merged.
-#     A migration script (see tcs-docs#26) sets this across all TCS repos.
+# Caller repo one-time config (recommended):
+#   - Settings → General → Pull Requests → "Allow auto-merge" = ON, so a PR
+#     blocked by branch protection merges itself once a human approves / the
+#     checks pass. Without it the PR still opens and accumulates; it just
+#     needs the merge button pressed.
+#   - "Automatically delete head branches" = ON keeps `bot/changelog` tidy.
+#
+# Known limit: on a repo whose branch protection requires reviews or status
+# checks, GITHUB_TOKEN cannot satisfy them (and PRs it opens don't trigger
+# check workflows), so the changelog PR needs a human to merge it. That is
+# the design: one open PR per repo, never a pile.
 #
 # Security note: issue title is USER-CONTROLLED on public repos. It is passed
 # to Python via environment variable (never interpolated into the script body)
@@ -56,12 +79,10 @@ jobs:
       - name: Check out caller repo
         uses: actions/checkout@v4
         with:
-          # Prefer TCS_PROJECT_TOKEN when the caller has it. Fall back to the
-          # caller's default GITHUB_TOKEN for repos without the org secret.
           token: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
           fetch-depth: 0
 
-      - name: Branch, append, PR, auto-merge (with direct-push fallback)
+      - name: Append entry, converge onto main
         env:
           GH_TOKEN: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
           ISSUE_NUM: ${{ inputs.issue_number }}
@@ -69,31 +90,21 @@ jobs:
           CLOSER: ${{ inputs.closed_by }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
+          BOT_BRANCH: bot/changelog
+          MAX_ATTEMPTS: "8"
         run: |
           set -euo pipefail
 
           # -----------------------------------------------------------------
-          # 0. Detect caller capability. If caller granted pull-requests:write,
-          #    use PR flow. If not, fall back to direct-push (pre-rewrite
-          #    behaviour — works on repos without branch protection).
-          # -----------------------------------------------------------------
-          # We probe by trying to list PRs on the caller repo — a no-op that
-          # requires pull-requests:read at minimum. If it succeeds, we assume
-          # write is also granted (they come in the same permission block).
-          if gh pr list --limit 1 >/dev/null 2>&1; then
-            USE_PR_FLOW=1
-            echo "Caller has pull-requests permission — using PR flow"
-          else
-            USE_PR_FLOW=0
-            echo "::notice::Caller lacks pull-requests permission — falling back to direct-push (branch-protected repos will fail; add pull-requests: write to caller permissions block to enable PR flow)"
-          fi
-
-          # -----------------------------------------------------------------
-          # 1. Write the append script (Python — same logic as pre-rewrite,
-          #    idempotent so a retry against a rebased branch doesn't dupe).
+          # 0. The append script. Idempotent, and able to carry over entries
+          #    that are pending on the bot branch but not yet on main, so the
+          #    branch can be rebuilt from main on every attempt.
+          #
+          #    usage: append_changelog.py [--carry-from OLD_CHANGELOG]
+          #    exit 0 = changed or already present; prints what it did.
           # -----------------------------------------------------------------
           cat > "$RUNNER_TEMP/append_changelog.py" <<'PY'
-          import os, pathlib, re
+          import os, pathlib, re, sys
           from datetime import datetime, timezone
 
           issue_num = os.environ["ISSUE_NUM"]
@@ -103,9 +114,16 @@ jobs:
 
           date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
           issue_url = f"https://github.com/{repo}/issues/{issue_num}"
-          # Minimal markdown escape for the title (leave the rest as-is)
           safe = title.replace("[", "\\[").replace("]", "\\]")
-          entry = f"- {safe} ([#{issue_num}]({issue_url})) — closed {date} by @{closer}\n"
+          entry = f"- {safe} ([#{issue_num}]({issue_url})) — closed {date} by @{closer}"
+          # The issue-link marker "[#N](" is the entry's identity: the same issue
+          # re-closed on another day (or reworded by a human) must not produce a
+          # second line. "[#21](" cannot match "[#210](" because of the "](".
+          ident = f"[#{issue_num}]("
+
+          carry_from = None
+          if len(sys.argv) == 3 and sys.argv[1] == "--carry-from":
+              carry_from = pathlib.Path(sys.argv[2])
 
           p = pathlib.Path("CHANGELOG.md")
           if not p.exists():
@@ -116,129 +134,183 @@ jobs:
                   "## [Unreleased]\n\n",
                   encoding="utf-8",
               )
-
           txt = p.read_text(encoding="utf-8")
 
-          # Idempotent: don't double-add on a re-run whose entry already landed.
-          if entry.strip() in txt:
-              print(f"Entry for #{issue_num} already present — nothing to do")
-              raise SystemExit(0)
+          def unreleased_entries(text):
+              """Entry lines under [Unreleased], top to bottom."""
+              out, inside = [], False
+              for line in text.splitlines():
+                  if line.startswith("## [Unreleased]"):
+                      inside = True; continue
+                  if inside and line.startswith("## "):
+                      break
+                  if inside and line.startswith("- "):
+                      out.append(line)
+              return out
 
-          # Ensure an [Unreleased] section exists. Insert just before the first
-          # release section so it lands after any intro paragraph.
+          def has_ident(text, i):
+              # Whole file, not just [Unreleased]: an entry a human already moved
+              # under a release heading must still count as present.
+              return i in text
+
+          # Ensure an [Unreleased] section exists, before the first release section.
           if "## [Unreleased]" not in txt:
               m = re.search(r"^## \[", txt, flags=re.M)
               if m:
                   txt = txt[:m.start()] + "## [Unreleased]\n\n" + txt[m.start():]
               else:
-                  if not txt.endswith("\n"):
-                      txt += "\n"
-                  txt += "\n## [Unreleased]\n\n"
+                  txt = txt.rstrip("\n") + "\n\n## [Unreleased]\n\n"
 
-          # Insert the entry under the [Unreleased] header (newest first).
-          lines = txt.splitlines(keepends=True)
-          for i, line in enumerate(lines):
-              if line.startswith("## [Unreleased]"):
-                  j = i + 1
-                  if j < len(lines) and lines[j].strip() == "":
-                      j += 1                        # keep the blank after the header
-                  else:
-                      lines.insert(j, "\n"); j += 1
-                  if j < len(lines) and lines[j].lstrip().startswith("- "):
-                      lines.insert(j, entry)        # existing entries: tight list
-                  else:
-                      lines.insert(j, entry)        # empty section: entry + blank
-                      lines.insert(j + 1, "\n")
-                  break
-          else:
+          def insert_top(text, line):
+              lines = text.splitlines(keepends=True)
+              for i, l in enumerate(lines):
+                  if l.startswith("## [Unreleased]"):
+                      j = i + 1
+                      if j < len(lines) and lines[j].strip() == "":
+                          j += 1
+                      else:
+                          lines.insert(j, "\n"); j += 1
+                      lines.insert(j, line + "\n")
+                      if not (j + 1 < len(lines) and lines[j + 1].lstrip().startswith("- ")):
+                          lines.insert(j + 1, "\n")   # empty section: keep a blank after the list
+                      return "".join(lines)
               raise SystemExit("Could not locate [Unreleased] header after bootstrap")
 
-          p.write_text("".join(lines), encoding="utf-8")
-          print(f"Appended entry for issue #{issue_num}")
+          changed = False
+
+          # Carry over entries pending on the old bot branch (present there,
+          # absent on main). Re-insert oldest-first so the block reads newest-first.
+          if carry_from is not None and carry_from.exists():
+              old = carry_from.read_text(encoding="utf-8")
+              main_entries = unreleased_entries(txt)
+              pending = [l for l in unreleased_entries(old) if l not in main_entries]
+              carried = 0
+              for l in reversed(pending):
+                  m_id = re.search(r"\[#\d+\]\(", l)
+                  if m_id and has_ident(txt, m_id.group(0)):
+                      continue   # same issue already on main (any section, any wording) — main wins
+                  txt = insert_top(txt, l); changed = True; carried += 1
+              if carried:
+                  print(f"Carried over {carried} pending entr{'y' if carried == 1 else 'ies'} from the bot branch")
+
+          if has_ident(txt, ident):
+              print(f"Entry for #{issue_num} already present")
+          else:
+              txt = insert_top(txt, entry); changed = True
+              print(f"Appended entry for issue #{issue_num}")
+
+          if changed:
+              p.write_text(txt, encoding="utf-8")
           PY
 
-          # -----------------------------------------------------------------
-          # 2. Set up git identity + resolve the caller's default branch.
-          # -----------------------------------------------------------------
+          # PR body for the (single, reused) changelog PR. Written once, up front.
+          cat > "$RUNNER_TEMP/pr_body.md" <<'MD'
+          Auto-maintained by `append-changelog.yml`. Each issue closed as *completed* adds one line under `[Unreleased]` in `CHANGELOG.md`; entries accumulate here until this PR merges.
+
+          Merges itself where the repo allows it. If it is waiting on you, that is branch protection (a review or checks required) — merging it is always safe: it only touches `CHANGELOG.md`.
+          MD
+
           git config user.name "tcs-bot"
           git config user.email "actions@github.com"
-
           base_branch=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
 
-          if [ "$USE_PR_FLOW" = "1" ]; then
-            # -------------------------------------------------------------
-            # PR FLOW — caller has pull-requests:write permission.
-            # Create bot branch → commit → PR → auto-merge.
-            # -------------------------------------------------------------
-            bot_branch="bot/changelog-issue-${ISSUE_NUM}-${RUN_ID}"
-            git checkout -b "$bot_branch"
-            python3 "$RUNNER_TEMP/append_changelog.py"
-
-            if [[ -z "$(git status --porcelain CHANGELOG.md)" ]]; then
-              echo "CHANGELOG.md unchanged — nothing to commit"
-              exit 0
-            fi
-
-            git add CHANGELOG.md
-            git commit -q -m "chore(changelog): entry for closed issue #${ISSUE_NUM}"
-            git push origin "$bot_branch"
-
-            pr_url=$(gh pr create \
-              --base "$base_branch" \
-              --head "$bot_branch" \
-              --title "chore(changelog): entry for #${ISSUE_NUM}" \
-              --body "Auto-generated by \`append-changelog.yml\` when issue [#${ISSUE_NUM}](https://github.com/${REPO}/issues/${ISSUE_NUM}) closed as completed.
-
-          Adds one entry to \`CHANGELOG.md\` under \`[Unreleased]\`. Merges automatically as soon as any required status checks pass.")
-
-            echo "PR: $pr_url"
-
-            if gh pr merge --auto --squash --delete-branch "$pr_url" 2>/dev/null; then
-              echo "Auto-merge enabled on PR $pr_url"
-              exit 0
-            fi
-
-            echo "::warning::Auto-merge could not be enabled. Trying immediate squash-merge."
-            if gh pr merge --squash --delete-branch "$pr_url" 2>/dev/null; then
-              echo "Squash-merged PR $pr_url immediately"
-              exit 0
-            fi
-
-            echo "::warning::Could not merge PR $pr_url automatically. Left open for manual review."
-            echo "::warning::Most likely cause: repo needs 'Allow auto-merge' enabled in Settings → General → Pull Requests."
-            echo "::warning::OR: branch protection requires PR review approvals (needs a human approval)."
-            exit 0
+          # Probe for pull-requests permission (direct-push fallback if absent).
+          if gh pr list --limit 1 >/dev/null 2>&1; then
+            use_pr=1; echo "Caller has pull-requests permission — using PR flow"
+          else
+            use_pr=0; echo "::notice::Caller lacks pull-requests permission — direct-push flow (fails on protected branches; add pull-requests: write to the caller)"
           fi
 
-          # -----------------------------------------------------------------
-          # DIRECT-PUSH FALLBACK — caller lacks pull-requests:write.
-          # Same as pre-rewrite behaviour. Works fine on repos without
-          # branch protection. Fails on protected repos (which is why the
-          # PR flow was added in the first place).
-          # -----------------------------------------------------------------
-          # Append + push, retrying on concurrent update.
-          for attempt in 1 2 3 4 5; do
-            python3 "$RUNNER_TEMP/append_changelog.py"
+          ident="[#${ISSUE_NUM}]("
+
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            echo "::group::attempt ${attempt}/${MAX_ATTEMPTS}"
+            git fetch -q origin "$base_branch"
+            # The bot branch may not exist yet; that is fine.
+            git fetch -q origin "+refs/heads/${BOT_BRANCH}:refs/remotes/origin/${BOT_BRANCH}" 2>/dev/null || true
+
+            # 1. Already on main? Then a previous attempt, an overlapping run, or a
+            #    human landed it. Done.
+            if git show "origin/${base_branch}:CHANGELOG.md" 2>/dev/null | grep -qF -- "$ident"; then
+              echo "Entry for #${ISSUE_NUM} is on ${base_branch} — done"
+              echo "::endgroup::"; exit 0
+            fi
+
+            # 2. Rebuild the bot branch = main + pending entries (if a bot branch
+            #    exists) + ours. Regenerate rather than rebase: nothing to conflict.
+            carry_args=()
+            old_tip=""
+            if git rev-parse -q --verify "origin/${BOT_BRANCH}" >/dev/null 2>&1; then
+              old_tip=$(git rev-parse "origin/${BOT_BRANCH}")
+              if git show "origin/${BOT_BRANCH}:CHANGELOG.md" > "$RUNNER_TEMP/old_changelog.md" 2>/dev/null; then
+                carry_args=(--carry-from "$RUNNER_TEMP/old_changelog.md")
+              fi
+            fi
+            git checkout -q -B "$BOT_BRANCH" "origin/${base_branch}"
+            python3 "$RUNNER_TEMP/append_changelog.py" "${carry_args[@]}"
 
             if [[ -z "$(git status --porcelain CHANGELOG.md)" ]]; then
-              echo "CHANGELOG.md unchanged — nothing to commit"
-              exit 0
+              echo "CHANGELOG.md unchanged against ${base_branch} — nothing to do"
+              echo "::endgroup::"; exit 0
             fi
-
             git add CHANGELOG.md
-            git commit -q -m "CHANGELOG: entry for closed issue #${ISSUE_NUM}"
+            git commit -q -m "chore(changelog): entry for closed issue #${ISSUE_NUM}"
 
-            if git push; then
-              echo "Direct-pushed on attempt ${attempt}"
-              exit 0
+            if [[ "$use_pr" = "0" ]]; then
+              # ---- direct-push flow -------------------------------------------
+              if git push -q origin "HEAD:${base_branch}"; then
+                echo "Direct-pushed to ${base_branch}"; echo "::endgroup::"; exit 0
+              fi
+              echo "push to ${base_branch} rejected — retrying"
+              echo "::endgroup::"; sleep $(( 2 + attempt * 2 + RANDOM % 4 )); continue
             fi
 
-            echo "Push attempt ${attempt} rejected — re-syncing and retrying..."
-            git fetch -q origin "$base_branch"
-            git reset -q --hard "origin/${base_branch}"
-            sleep $(( attempt * 2 ))
+            # ---- PR flow -----------------------------------------------------
+            # Lease against the tip we fetched: an overlapping run that pushed in
+            # between makes this fail, and we rebuild on top of its work.
+            if ! git push -q --force-with-lease="${BOT_BRANCH}:${old_tip}" origin "HEAD:refs/heads/${BOT_BRANCH}"; then
+              echo "push lost the lease on ${BOT_BRANCH} (overlapping run) — retrying"
+              echo "::endgroup::"; sleep $(( 1 + RANDOM % 4 )); continue
+            fi
+
+            pr_url=$(gh pr list --head "$BOT_BRANCH" --base "$base_branch" --state open --json url -q '.[0].url' || true)
+            if [[ -z "$pr_url" ]]; then
+              pr_url=$(gh pr create \
+                --base "$base_branch" --head "$BOT_BRANCH" \
+                --title "chore(changelog): pending [Unreleased] entries" \
+                --body-file "$RUNNER_TEMP/pr_body.md" 2>&1) || {
+                # Lost a create race with an overlapping run → reuse theirs next loop.
+                echo "pr create failed: ${pr_url}"
+                echo "::endgroup::"; sleep $(( 1 + RANDOM % 4 )); continue
+              }
+              echo "Opened PR: $pr_url"
+            else
+              echo "Reusing open PR: $pr_url"
+            fi
+
+            # 3. Try to land it now. Keep stderr: it tells us which case we are in.
+            if merge_out=$(gh pr merge --squash --delete-branch "$pr_url" 2>&1); then
+              echo "Squash-merged: $pr_url"; echo "::endgroup::"; exit 0
+            fi
+            echo "immediate merge failed: ${merge_out}"
+
+            # Race with an overlapping run or a fresh push to main → rebuild and retry.
+            # (*onflict* is deliberate: it covers "conflict", "Conflict" and "CONFLICTING".)
+            case "$merge_out" in
+              *not\ mergeable*|*Base\ branch\ was\ modified*|*Head\ branch\ was\ modified*|*onflict*|*mergeability*|*UNKNOWN*|*already\ been\ merged*|*Pull\ request\ is\ in*)
+                echo "::endgroup::"; sleep $(( 2 + attempt * 2 + RANDOM % 4 )); continue ;;
+            esac
+
+            # Branch protection (review / checks) or a repo where immediate merge is
+            # not allowed: park it with auto-merge if the repo permits that.
+            if auto_out=$(gh pr merge --auto --squash --delete-branch "$pr_url" 2>&1); then
+              echo "::notice::Auto-merge enabled on $pr_url — it merges when branch protection is satisfied; later entries accumulate on it."
+            else
+              echo "::warning::Could not merge or auto-merge $pr_url: ${auto_out}"
+              echo "::warning::The PR stays open and later entries will be added to it. Enable 'Allow auto-merge' in repo settings so it merges itself once approved / checks pass."
+            fi
+            echo "::endgroup::"; exit 0
           done
 
-          echo "::error::Could not push CHANGELOG update after 5 attempts (direct-push fallback)"
-          echo "::error::If this repo has branch protection, add \`pull-requests: write\` to the caller's permissions block to enable PR flow"
+          echo "::error::Could not land the CHANGELOG entry for #${ISSUE_NUM} after ${MAX_ATTEMPTS} attempts"
           exit 1
