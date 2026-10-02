@@ -2,30 +2,54 @@ name: Append entry to CHANGELOG (reusable)
 
 # Reusable workflow. Called by per-repo on-issue-close workflows to append
 # a Keep-a-Changelog "Unreleased" entry when an issue is closed as completed.
+# The same file lives in The-Canadian-Space/.github and gitpush-mod/.github;
+# only the token secret and the bot's git name differ.
 #
-# 2026-09-19 rewrite: converge-per-run (previously one PR per issue).
-#   The 08-18 PR flow opened `bot/changelog-issue-<n>-<run>` per closed issue
-#   and tried one immediate merge. When several issues closed together the
-#   runs overlapped, the first merge moved main, and every other PR became
-#   CONFLICTING on the same [Unreleased] line — with stderr discarded, so the
-#   log just said "left open for manual review". 14 stacked PRs across 5 repos
-#   on 2026-09-19. (tcs-scripts#17 tried a caller-side `concurrency` group;
-#   it only reached one repo, and GitHub *cancels* older pending runs in a
-#   group, which would silently drop entries instead of stacking them.)
+# History:
+#   2026-08-18  PR flow instead of pushing to main, which branch protection
+#               rejected: 3 TCS repos were silently missing entries.
+#   2026-09-19  Converge per run on ONE bot branch. The 08-18 flow opened a PR
+#               per issue; when several issues closed together, the first merge
+#               moved main and every other PR conflicted on the same
+#               [Unreleased] line (14 stacked PRs across 5 repos). A caller-side
+#               `concurrency` group is no answer: GitHub cancels older pending
+#               runs in a group, silently dropping entries (tcs-scripts#17).
+#   2026-10-02  (tcs-workflows#127) Seven issues closed in two minutes; two
+#               entries never landed:
+#               - Livelock on the reused PR. Every attempt re-pushed a fresh
+#                 commit and merged at once. GitHub recomputes a PR's head and
+#                 mergeability asynchronously after a push, so the merge failed
+#                 ("Pull Request is not mergeable", "Base branch was modified")
+#                 every time, even after the other runs had finished. Now a round
+#                 whose rebuilt branch equals the existing one keeps that head,
+#                 and the merge waits for GitHub's merge state for exactly that
+#                 head, then merges only that head.
+#               - "Head branch is out of date" was not retried: the run fell
+#                 through to the auto-merge branch and exited 0, nothing landed.
+#               Also: losing a race to an overlapping run no longer uses up an
+#               attempt (a burst of closes starved the unlucky runs; a deadline
+#               bounds it instead), and where GitHub Actions may not open PRs
+#               (repo setting, or a token without pull-request rights) the entry
+#               is pushed to the default branch; if that branch requires PRs,
+#               the run fails saying what to change.
 #
-#   New flow, per run, no concurrency group:
-#     1. fetch main; if our entry is already there → done (idempotent).
-#     2. rebuild ONE stable branch `bot/changelog` = main + any entries still
-#        pending on that branch (carried over) + ours; force-push with lease.
-#        Never rebase — regenerate, so there is nothing to conflict.
-#     3. one open PR from that branch (create or reuse).
-#     4. try an immediate squash-merge. On a merge race / conflict / stale
-#        mergeability → sleep with jitter and go back to 1. On branch
-#        protection (review or checks required) → enable auto-merge and stop:
-#        the PR waits for a human, and later entries ACCUMULATE on it instead
-#        of opening new conflicting PRs.
-#   Runs that overlap converge: whoever loses the push lease or the merge
-#   race simply rebuilds on top of the winner.
+# Flow, per run, no concurrency group:
+#   1. fetch the default branch; if our entry is already there → done.
+#   2. rebuild ONE stable branch `bot/changelog` = default branch + entries
+#      still pending on that branch (carried over) + ours. Never rebase:
+#      regenerate, so there is nothing to conflict. Push it with a lease,
+#      unless the branch already holds exactly that on the current default
+#      branch.
+#   3. one open PR from that branch (create or reuse).
+#   4. wait until GitHub has computed the merge state for that head, then:
+#        CLEAN / UNSTABLE / HAS_HOOKS → squash-merge that exact head
+#        BLOCKED (branch protection: review or checks) → enable auto-merge and
+#                 stop; the PR waits for a human, and later entries ACCUMULATE
+#                 on it instead of opening new PRs
+#        anything else → back to 1
+#   Overlapping runs converge: whoever loses the push lease or the merge race
+#   rebuilds on top of the winner, which is progress, not a failed attempt.
+#   A run gives up after MAX_ATTEMPTS real failures or MAX_SECONDS overall.
 #
 # Caller must:
 #   - grant `permissions: contents: write, pull-requests: write`
@@ -41,10 +65,13 @@ name: Append entry to CHANGELOG (reusable)
 #     needs the merge button pressed.
 #   - "Automatically delete head branches" = ON keeps `bot/changelog` tidy.
 #
-# Known limit: on a repo whose branch protection requires reviews or status
+# Known limits: on a repo whose branch protection requires reviews or status
 # checks, GITHUB_TOKEN cannot satisfy them (and PRs it opens don't trigger
-# check workflows), so the changelog PR needs a human to merge it. That is
-# the design: one open PR per repo, never a pile.
+# check workflows), so the changelog PR needs a human to merge it. If GitHub
+# Actions may not create PRs there either (Settings → Actions → General →
+# "Allow GitHub Actions to create and approve pull requests"), the entry
+# cannot land at all: the run fails saying so, and entries wait on
+# `bot/changelog` until the setting changes.
 #
 # Security note: issue title is USER-CONTROLLED on public repos. It is passed
 # to Python via environment variable (never interpolated into the script body)
@@ -72,6 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     # Only append when the issue was closed as "completed" (not "not planned")
     if: inputs.state_reason == 'completed'
+    timeout-minutes: 20
     permissions:
       contents: write
       pull-requests: write
@@ -82,7 +110,7 @@ jobs:
           token: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
           fetch-depth: 0
 
-      - name: Append entry, converge onto main
+      - name: Append entry, converge onto the default branch
         env:
           GH_TOKEN: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
           ISSUE_NUM: ${{ inputs.issue_number }}
@@ -90,8 +118,11 @@ jobs:
           CLOSER: ${{ inputs.closed_by }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BOT_BRANCH: bot/changelog
+          BOT_NAME: tcs-bot
           MAX_ATTEMPTS: "8"
+          MAX_SECONDS: "900"
         run: |
           set -euo pipefail
 
@@ -210,41 +241,105 @@ jobs:
           Merges itself where the repo allows it. If it is waiting on you, that is branch protection (a review or checks required) — merging it is always safe: it only touches `CHANGELOG.md`.
           MD
 
-          git config user.name "tcs-bot"
+          git config user.name "$BOT_NAME"
           git config user.email "actions@github.com"
-          base_branch=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+          # The default branch comes with the issues event; ask the API only if it doesn't.
+          base_branch=${DEFAULT_BRANCH:-}
+          for _ in 1 2 3; do
+            [[ -n "$base_branch" ]] && break
+            base_branch=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name || true)
+            [[ -n "$base_branch" ]] || sleep 5
+          done
+          if [[ -z "$base_branch" ]]; then echo "::error::Could not find the default branch"; exit 1; fi
 
-          # Probe for pull-requests permission (direct-push fallback if absent).
-          if gh pr list --limit 1 >/dev/null 2>&1; then
-            use_pr=1; echo "Caller has pull-requests permission — using PR flow"
-          else
-            use_pr=0; echo "::notice::Caller lacks pull-requests permission — direct-push flow (fails on protected branches; add pull-requests: write to the caller)"
+          # Probe for pull-requests permission (direct-push fallback if absent). Only a
+          # permission error switches flows: a hiccup here must not send the entry
+          # around the PR flow.
+          use_pr=1; direct_reason=""
+          if ! probe_err=$(gh pr list --limit 1 2>&1 >/dev/null); then
+            case "$probe_err" in
+              *Resource\ not\ accessible*|*HTTP\ 403*)
+                use_pr=0; direct_reason="no-permission"
+                echo "::notice::Caller lacks pull-requests permission — direct-push flow (fails on protected branches; add pull-requests: write to the caller)" ;;
+              *)
+                echo "::warning::Could not check pull-request access (${probe_err}) — trying the PR flow" ;;
+            esac
           fi
+          if [[ "$use_pr" = "1" ]]; then echo "Using the PR flow"; fi
 
           ident="[#${ISSUE_NUM}]("
+          attempt=0   # failed attempts; losing a race to an overlapping run is not one
+          round=0
+          deadline=$(( SECONDS + MAX_SECONDS ))
 
-          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-            echo "::group::attempt ${attempt}/${MAX_ATTEMPTS}"
-            git fetch -q origin "$base_branch"
-            # The bot branch may not exist yet; that is fine.
-            git fetch -q origin "+refs/heads/${BOT_BRANCH}:refs/remotes/origin/${BOT_BRANCH}" 2>/dev/null || true
+          # An overlapping run pushed or merged first. That is progress (theirs, and often
+          # ours too), so go again soon without using up an attempt; the deadline bounds it.
+          contended() {
+            echo "$1 — going again"; echo "::endgroup::"
+            sleep $(( 1 + RANDOM % 3 ))
+          }
+          # Something went wrong: use up an attempt and back off.
+          failed() {
+            attempt=$(( attempt + 1 ))
+            echo "$1 — attempt ${attempt}/${MAX_ATTEMPTS} failed"; echo "::endgroup::"
+            local s=$(( 2 + attempt * 2 ))
+            if (( s > 20 )); then s=20; fi
+            sleep $(( s + RANDOM % 4 ))
+          }
 
-            # 1. Already on main? Then a previous attempt, an overlapping run, or a
-            #    human landed it. Done.
-            if git show "origin/${base_branch}:CHANGELOG.md" 2>/dev/null | grep -qF -- "$ident"; then
+          # Wait until GitHub reports a merge state for exactly <sha> on <pr>. Prints it
+          # (CLEAN, BLOCKED, DIRTY, BEHIND, UNSTABLE, HAS_HOOKS), GONE if the PR is no longer
+          # open, MOVED if an overlapping run has pushed another head since, or UNKNOWN if
+          # GitHub hasn't settled within ~40 s. GitHub computes the PR's head and merge state
+          # asynchronously after every push to the head or the base.
+          merge_state() {
+            local pr=$1 sha=$2 out head state prstate tip
+            for _ in $(seq 1 20); do
+              out=$(gh pr view "$pr" --json headRefOid,mergeStateStatus,state \
+                      -q '.headRefOid + " " + .mergeStateStatus + " " + .state' 2>/dev/null || true)
+              head=""; state=""; prstate=""
+              read -r head state prstate <<<"$out" || true
+              if [[ -n "$prstate" && "$prstate" != "OPEN" ]]; then echo GONE; return 0; fi
+              if [[ "$head" == "$sha" ]]; then
+                if [[ -n "$state" && "$state" != "UNKNOWN" ]]; then echo "$state"; return 0; fi
+              elif [[ -n "$head" ]]; then
+                # The PR shows another head: GitHub hasn't caught up with our push yet, or
+                # an overlapping run has pushed since. The branch itself says which.
+                tip=$(git ls-remote origin "refs/heads/${BOT_BRANCH}" 2>/dev/null || true)
+                if [[ "${tip%%[[:space:]]*}" != "$sha" ]]; then echo MOVED; return 0; fi
+              fi
+              sleep 2
+            done
+            echo UNKNOWN
+          }
+
+          while (( attempt < MAX_ATTEMPTS && SECONDS < deadline )); do
+            round=$(( round + 1 ))
+            echo "::group::round ${round}"
+            if ! git fetch -q origin "$base_branch"; then failed "fetching ${base_branch} failed"; continue; fi
+            # Read the bot branch fresh each round. A tracking ref left over from an earlier
+            # fetch can outlive the branch (merged with --delete-branch by another run), and a
+            # push leased against it would be rejected every time.
+            git update-ref -d "refs/remotes/origin/${BOT_BRANCH}" 2>/dev/null || true
+            old_tip=""
+            if git fetch -q origin "+refs/heads/${BOT_BRANCH}:refs/remotes/origin/${BOT_BRANCH}" 2>/dev/null; then
+              old_tip=$(git rev-parse "refs/remotes/origin/${BOT_BRANCH}")
+            fi
+
+            # 1. Already on the default branch? Then an earlier round, an overlapping run,
+            #    or a human landed it. Done. (Read it into a variable: `git show | grep -q`
+            #    fails under pipefail when grep stops early on a large file.)
+            main_changelog=$(git show "origin/${base_branch}:CHANGELOG.md" 2>/dev/null || true)
+            if [[ "$main_changelog" == *"$ident"* ]]; then
               echo "Entry for #${ISSUE_NUM} is on ${base_branch} — done"
               echo "::endgroup::"; exit 0
             fi
 
-            # 2. Rebuild the bot branch = main + pending entries (if a bot branch
+            # 2. Rebuild the bot branch = default branch + pending entries (if a bot branch
             #    exists) + ours. Regenerate rather than rebase: nothing to conflict.
             carry_args=()
-            old_tip=""
-            if git rev-parse -q --verify "origin/${BOT_BRANCH}" >/dev/null 2>&1; then
-              old_tip=$(git rev-parse "origin/${BOT_BRANCH}")
-              if git show "origin/${BOT_BRANCH}:CHANGELOG.md" > "$RUNNER_TEMP/old_changelog.md" 2>/dev/null; then
-                carry_args=(--carry-from "$RUNNER_TEMP/old_changelog.md")
-              fi
+            if [[ -n "$old_tip" ]] && git show "${old_tip}:CHANGELOG.md" > "$RUNNER_TEMP/old_changelog.md" 2>/dev/null; then
+              carry_args=(--carry-from "$RUNNER_TEMP/old_changelog.md")
             fi
             git checkout -q -B "$BOT_BRANCH" "origin/${base_branch}"
             python3 "$RUNNER_TEMP/append_changelog.py" "${carry_args[@]}"
@@ -255,54 +350,107 @@ jobs:
             fi
             git add CHANGELOG.md
             git commit -q -m "chore(changelog): entry for closed issue #${ISSUE_NUM}"
+            head_sha=$(git rev-parse HEAD)
 
             if [[ "$use_pr" = "0" ]]; then
-              # ---- direct-push flow -------------------------------------------
-              if git push -q origin "HEAD:${base_branch}"; then
-                echo "Direct-pushed to ${base_branch}"; echo "::endgroup::"; exit 0
+              # ---- direct-push flow -----------------------------------------------
+              if push_out=$(git push -q origin "HEAD:${base_branch}" 2>&1); then
+                echo "Pushed the entry to ${base_branch}"
+                # No PR can be opened here, and the entries we carried from the bot branch
+                # are on the default branch now. Delete it, unless it has moved since.
+                if [[ "$direct_reason" = "pr-not-allowed" && -n "$old_tip" ]]; then
+                  git push -q --force-with-lease="${BOT_BRANCH}:${old_tip}" origin --delete "$BOT_BRANCH" >/dev/null 2>&1 || true
+                fi
+                echo "::endgroup::"; exit 0
               fi
-              echo "push to ${base_branch} rejected — retrying"
-              echo "::endgroup::"; sleep $(( 2 + attempt * 2 + RANDOM % 4 )); continue
+              case "$push_out" in
+                *GH006*|*GH013*|*rotected\ branch*)
+                  echo "::error::${base_branch} only takes changes through a pull request, and this run cannot open one. ${push_out}"
+                  if [[ "$direct_reason" = "pr-not-allowed" ]]; then
+                    echo "::error::Entries wait on the ${BOT_BRANCH} branch. To let them land, enable Settings → Actions → General → 'Allow GitHub Actions to create and approve pull requests' (the PR will then wait for a review), or open a PR from ${BOT_BRANCH} by hand."
+                  else
+                    echo "::error::Add 'pull-requests: write' to the caller's permissions block so the PR flow can run."
+                  fi
+                  echo "::endgroup::"; exit 1 ;;
+                *fetch\ first*|*non-fast-forward*|*cannot\ lock\ ref*|*failed\ to\ update\ ref*|*incorrect\ old\ value*)
+                  contended "${base_branch} moved (overlapping run)"; continue ;;
+              esac
+              failed "push to ${base_branch} rejected: ${push_out}"; continue
             fi
 
-            # ---- PR flow -----------------------------------------------------
-            # Lease against the tip we fetched: an overlapping run that pushed in
-            # between makes this fail, and we rebuild on top of its work.
-            if ! git push -q --force-with-lease="${BOT_BRANCH}:${old_tip}" origin "HEAD:refs/heads/${BOT_BRANCH}"; then
-              echo "push lost the lease on ${BOT_BRANCH} (overlapping run) — retrying"
-              echo "::endgroup::"; sleep $(( 1 + RANDOM % 4 )); continue
+            # ---- PR flow --------------------------------------------------------
+            # Keep the existing head when it already holds exactly this content on top of the
+            # current default branch: pushing an identical tree again only restarts GitHub's
+            # mergeability computation, and merging straight after a push is what livelocked.
+            if [[ -n "$old_tip" ]] && git merge-base --is-ancestor "origin/${base_branch}" "$old_tip" \
+                 && git diff --quiet "$old_tip" "$head_sha"; then
+              head_sha=$old_tip
+              echo "${BOT_BRANCH} already holds this on ${base_branch} — keeping ${old_tip:0:7}"
+            elif ! push_out=$(git push -q --force-with-lease="${BOT_BRANCH}:${old_tip}" origin "HEAD:refs/heads/${BOT_BRANCH}" 2>&1); then
+              # Leased against the tip we fetched: an overlapping run that pushed or merged
+              # in between makes this fail, and we rebuild on top of its work.
+              case "$push_out" in
+                *stale\ info*|*already\ exists*|*fetch\ first*|*non-fast-forward*|*cannot\ lock\ ref*|*failed\ to\ update\ ref*|*incorrect\ old\ value*)
+                  contended "${BOT_BRANCH} moved (overlapping run)"; continue ;;
+              esac
+              failed "push to ${BOT_BRANCH} rejected: ${push_out}"; continue
             fi
 
             pr_url=$(gh pr list --head "$BOT_BRANCH" --base "$base_branch" --state open --json url -q '.[0].url' || true)
             if [[ -z "$pr_url" ]]; then
-              pr_url=$(gh pr create \
-                --base "$base_branch" --head "$BOT_BRANCH" \
-                --title "chore(changelog): pending [Unreleased] entries" \
-                --body-file "$RUNNER_TEMP/pr_body.md" 2>&1) || {
-                # Lost a create race with an overlapping run → reuse theirs next loop.
-                echo "pr create failed: ${pr_url}"
-                echo "::endgroup::"; sleep $(( 1 + RANDOM % 4 )); continue
-              }
+              if ! create_out=$(gh pr create \
+                    --base "$base_branch" --head "$BOT_BRANCH" \
+                    --title "chore(changelog): pending [Unreleased] entries" \
+                    --body-file "$RUNNER_TEMP/pr_body.md" 2>&1); then
+                case "$create_out" in
+                  *not\ permitted\ to\ create*|*Resource\ not\ accessible*)
+                    # This repo or token cannot open PRs at all (Actions setting, or a token
+                    # without pull-request rights): land the entry on the default branch instead.
+                    echo "::notice::Cannot open a pull request here — pushing the entry to ${base_branch} instead. (${create_out})"
+                    use_pr=0; direct_reason="pr-not-allowed"
+                    echo "::endgroup::"; continue ;;
+                  *already\ exists*)
+                    contended "an overlapping run opened the PR first"; continue ;;
+                  *Head\ ref\ must\ be\ a\ branch*|*Head\ sha\ can\'t\ be\ blank*)
+                    contended "${BOT_BRANCH} was deleted under us (an overlapping run merged)"; continue ;;
+                esac
+                failed "pr create failed: ${create_out}"; continue
+              fi
+              pr_url=$(grep -Eo 'https://[^[:space:]]+/pull/[0-9]+' <<<"$create_out" | tail -n 1 || true)
+              if [[ -z "$pr_url" ]]; then failed "pr create printed no PR URL: ${create_out}"; continue; fi
               echo "Opened PR: $pr_url"
             else
               echo "Reusing open PR: $pr_url"
             fi
 
-            # 3. Try to land it now. Keep stderr: it tells us which case we are in.
-            if merge_out=$(gh pr merge --squash --delete-branch "$pr_url" 2>&1); then
-              echo "Squash-merged: $pr_url"; echo "::endgroup::"; exit 0
-            fi
-            echo "immediate merge failed: ${merge_out}"
-
-            # Race with an overlapping run or a fresh push to main → rebuild and retry.
-            # (*onflict* is deliberate: it covers "conflict", "Conflict" and "CONFLICTING".)
-            case "$merge_out" in
-              *not\ mergeable*|*Base\ branch\ was\ modified*|*Head\ branch\ was\ modified*|*onflict*|*mergeability*|*UNKNOWN*|*already\ been\ merged*|*Pull\ request\ is\ in*)
-                echo "::endgroup::"; sleep $(( 2 + attempt * 2 + RANDOM % 4 )); continue ;;
+            # 3. Wait for GitHub's merge state for exactly this head, then act on it.
+            state=$(merge_state "$pr_url" "$head_sha")
+            echo "merge state of ${head_sha:0:7}: ${state}"
+            case "$state" in
+              CLEAN|UNSTABLE|HAS_HOOKS)
+                if merge_out=$(gh pr merge --squash --delete-branch --match-head-commit "$head_sha" "$pr_url" 2>&1); then
+                  echo "Squash-merged: $pr_url"; echo "::endgroup::"; exit 0
+                fi
+                case "$merge_out" in
+                  *blocked\ by\ branch\ protection*|*policy\ prohibits*|*approving\ review*|*review\ is\ required*|*required\ status\ check*)
+                    ;;   # branch protection after all: park it below
+                  *already\ merged*|*Head\ branch\ was\ modified*|*Base\ branch\ was\ modified*|*out\ of\ date*)
+                    contended "merge raced an overlapping run: ${merge_out}"; continue ;;
+                  *)
+                    failed "merge failed: ${merge_out}"; continue ;;
+                esac ;;
+              BLOCKED)
+                ;;       # branch protection (a review or checks required): park it below
+              GONE|MOVED|DIRTY|BEHIND)
+                # Merged, closed or pushed to by an overlapping run, or the default branch
+                # moved under the PR: rebuild on the current state.
+                contended "PR ${state}"; continue ;;
+              *)
+                failed "GitHub did not settle the merge state of ${head_sha:0:7}"; continue ;;
             esac
 
-            # Branch protection (review / checks) or a repo where immediate merge is
-            # not allowed: park it with auto-merge if the repo permits that.
+            # Branch protection: park the PR with auto-merge. It merges once a human approves
+            # or the checks pass; until then later entries accumulate on it.
             if auto_out=$(gh pr merge --auto --squash --delete-branch "$pr_url" 2>&1); then
               echo "::notice::Auto-merge enabled on $pr_url — it merges when branch protection is satisfied; later entries accumulate on it."
             else
@@ -312,5 +460,5 @@ jobs:
             echo "::endgroup::"; exit 0
           done
 
-          echo "::error::Could not land the CHANGELOG entry for #${ISSUE_NUM} after ${MAX_ATTEMPTS} attempts"
+          echo "::error::Could not land the CHANGELOG entry for #${ISSUE_NUM}: ${attempt} failed attempt(s) in ${round} round(s), ${SECONDS}s"
           exit 1
