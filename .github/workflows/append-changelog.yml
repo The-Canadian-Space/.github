@@ -53,7 +53,7 @@ name: Append entry to CHANGELOG (reusable)
 #
 # Caller must:
 #   - grant `permissions: contents: write, pull-requests: write`
-#   - use `secrets: inherit` (TCS_PROJECT_TOKEN is used if the caller has it;
+#   - use `secrets: inherit` (PAT_TCS_PROJECT is used if the caller has it;
 #     otherwise the caller's GITHUB_TOKEN)
 #   - pass the closed issue's number, title, closer, and state_reason
 #   - NOT wrap the call in a `concurrency` group (see above)
@@ -107,12 +107,12 @@ jobs:
       - name: Check out caller repo
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
+          token: ${{ secrets.PAT_TCS_PROJECT || github.token }}
           fetch-depth: 0
 
       - name: Append entry, converge onto the default branch
         env:
-          GH_TOKEN: ${{ secrets.TCS_PROJECT_TOKEN || github.token }}
+          GH_TOKEN: ${{ secrets.PAT_TCS_PROJECT || github.token }}
           ISSUE_NUM: ${{ inputs.issue_number }}
           ISSUE_TITLE: ${{ inputs.issue_title }}
           CLOSER: ${{ inputs.closed_by }}
