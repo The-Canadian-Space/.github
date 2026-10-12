@@ -10,9 +10,9 @@
   <a href="https://godimas101.github.io/portfolio/"><img src="https://img.shields.io/badge/Chris's%20Portfolio-godimas101.github.io-C5B029?style=for-the-badge&logo=githubpages&logoColor=white" alt="Chris's Portfolio" /></a>
 </p>
 
-> **"Aerospace news for Canada — fully automated, end-to-end."**
+> **"Aerospace news for Canada — automated end to end, with a human at the publish button."**
 
-The Canadian Space is a real production newsroom that discovers, researches, edits, and publishes aerospace stories relevant to Canada — without human intervention. Seven specialized blog workflows, an AI editor pass, cost tracking, and social publishing, all orchestrated in **n8n** on a self-hosted VPS. Stories land at [**thecanadian.space**](https://thecanadian.space) 24/7.
+The Canadian Space is a real production newsroom that discovers, researches, drafts and fact-checks aerospace stories relevant to Canada. Seven specialized blog workflows, a publishing pipeline with an AI fact check, cost tracking, and social publishing, all orchestrated in **n8n** on a self-hosted VPS. Every post lands as a draft, and Chris reads it before it goes live at [**thecanadian.space**](https://thecanadian.space).
 
 ## 🚀 Shipping now
 
@@ -29,9 +29,9 @@ The Canadian Space is a real production newsroom that discovers, researches, edi
 | **Canada From Orbit** | Canadian satellite + payload data |
 
 Plus:
-- **Editor LLM** — Claude Haiku with SEO rules + fact-check safeguards; Grok 3 fallback on API errors
-- **Cost tracking** — real-time LLM API spend (Anthropic + Google + xAI), weekly digest
-- **Social posts** — automated X + LinkedIn engagement
+- **Publishing pipeline** — an SEO step, then a claim-by-claim fact check of each post against the articles the author read (GPT-6 Sol, with Claude Sonnet 5.5 as backup). Live for the Daily Broadcast since October 2026; the other six blogs still use a single editor pass (GPT-5-mini) and move over one at a time
+- **Cost tracking** — LLM and scraper spend recorded for every post, with a daily digest
+- **Social posts** — X, Facebook and Instagram posts when an article is published, plus a cross-post to Discord
 - **Multi-source ingestion** — 40+ news sources via Crawl4AI + plain HTTP + WordPress REST APIs
 
 ## 🧰 The stack
@@ -47,10 +47,10 @@ Plus:
   <img src="https://img.shields.io/badge/Claude-DC7B4C?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude" />
 </p>
 
-- **Orchestration:** n8n (39 workflows total)
+- **Orchestration:** n8n (28 TCS workflows)
 - **Python:** article scraper, cost processors, API helpers
 - **CMS:** WordPress (Newfold hosting)
-- **LLMs:** Anthropic Claude (Haiku primary, Opus for heavy analysis), Google Gemini, xAI Grok via OpenRouter
+- **LLMs:** Qwen, Anthropic Claude, OpenAI GPT, Google Gemini and xAI Grok via OpenRouter ([which model does what](https://wiki.thecanadian.space/technology/tech-stack))
 - **Infrastructure:** OVH VPS2 — Docker + Redis + Caddy reverse proxy
 - **SEO:** Rank Math WordPress plugin
 
@@ -69,7 +69,7 @@ Plus:
 
 | Repo | Status |
 |---|---|
-| **tcs-workflows** | Automated backups of all 39 n8n workflows |
+| **tcs-workflows** | Nightly backups of the 28 TCS n8n workflows |
 | **tcs-docs** | Internal wiki (Cloudflare-Access-gated) |
 | **tcs-archive** | Historical dev artifacts |
 | **tcs-discord** | *In planning* — Discord community hub: server architecture, bot configs, integration wiring |
@@ -82,7 +82,7 @@ Plus:
 - **Discord community hub** — server + admin alerting + blog notifications + game/mod ticket feeds ([`tcs-discord`](https://github.com/The-Canadian-Space/tcs-discord), currently in Phase 1 planning)
 - **tcs-webpage rebuild** — move away from WordPress to a custom frontend (design phase)
 - **TCS arcade launch** — two browser games in development ([`idle-launch`](https://github.com/The-Canadian-Space/idle-launch) + [`autodoom`](https://github.com/The-Canadian-Space/autodoom), currently private during build)
-- **Fact-checker LLM pass** — automated claim verification via extended-thinking models
+- **The fact-checked pipeline for every blog** — the six blogs still on the older editor move over one at a time
 - **International aerospace sources** — expanding beyond Canada-adjacent coverage
 
 ## 📖 Visit
